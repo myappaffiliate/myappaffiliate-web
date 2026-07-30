@@ -1,0 +1,26 @@
+{
+  "name": "@maa/sdk-web",
+  "version": "0.1.0",
+  "description": "Browser attribution SDK for MyAppAffiliate — affiliate attribution for SaaS websites and web apps",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/myappaffiliate/myappaffiliate-web.git"
+  },
+  "homepage": "https://myappaffiliate.com",
+  "bugs": "https://github.com/myappaffiliate/myappaffiliate-web/issues",
+  "keywords": ["affiliate", "attribution", "referral", "saas", "analytics"],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
