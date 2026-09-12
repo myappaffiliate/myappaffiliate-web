@@ -1,12 +1,29 @@
 /**
- * @myappaffiliate/sdk-web — browser attribution SDK for MyAppAffiliate.
+ * @maa/sdk-web — browser attribution SDK for MyAppAffiliate.
  *
- * Zero runtime dependencies. Works for SaaS websites and web apps: captures
- * referral codes (?via=) and claim tokens (?ct=) from the landing URL, fires
- * an install against the API, and binds the signed-up user via identify().
- * Every network failure is silent-safe — the SDK never throws into the host.
- * All calls are SSR-safe no-ops when `window` is undefined.
+ * The whole integration is one line:
+ *
+ *     myAppAffiliate.start("pk_live_…");
+ *
+ * …plus `identify(userId)` once you know who the user is. `start` resolves the
+ * API host itself, captures `?via=` / `?ct=` from the landing URL, keeps
+ * capturing across client-side route changes, and retries anything an offline
+ * first visit failed to deliver.
+ *
+ * Everything beyond that — a different host, your own storage, manual capture —
+ * is an optional field on the options object, never a required argument.
+ *
+ * Zero runtime dependencies. Every network failure is silent-safe: the SDK
+ * never throws into the host page. All calls are SSR-safe no-ops when `window`
+ * is undefined.
  */
+
+/**
+ * Where the SDK talks to when nothing overrides it. Mirrors `SITE.api` in
+ * @maa/brand — inlined rather than imported so this package stays
+ * dependency-free for a customer's bundler.
+ */
+export const DEFAULT_API_BASE_URL = "https://api.myappaffiliate.com";
 
 /** Minimal synchronous storage; injectable for tests. Defaults to localStorage. */
 export interface WebStorage {
@@ -15,15 +32,30 @@ export interface WebStorage {
   remove(key: string): void;
 }
 
-export interface InitOptions {
-  /** SDK API key ("Bearer <sdkKey>"). */
+export interface StartOptions {
+  /** Your SDK key from the dashboard ("pk_live_…"). The only required field. */
   apiKey: string;
-  /** e.g. "https://api.myappaffiliate.com". */
-  baseUrl: string;
+  /**
+   * Override the API host. You do NOT need this in production — it defaults to
+   * {@link DEFAULT_API_BASE_URL}. Set it only to point at a staging API or a
+   * self-hosted deployment.
+   *
+   * Resolution order: this field → `<script data-api-base-url>` →
+   * `globalThis.MAA_API_BASE_URL` → the default.
+   */
+  apiBaseUrl?: string;
   /** Read via|ref|maa_code|code and claim_token|ct from location.search. Default true. */
   autoCapture?: boolean;
+  /**
+   * Keep capturing after client-side route changes (pushState/replaceState/
+   * popstate). Default true — it is why an SPA needs no `capture()` call of its
+   * own. Requires `autoCapture`.
+   */
+  spa?: boolean;
   /** Override storage (tests / cookie-based setups). Defaults to localStorage. */
   storage?: WebStorage;
+  /** Log what the SDK decided, to the console. Off by default. */
+  debug?: boolean;
 }
 
 export const DEVICE_ID_KEY = "maa_device_id";
@@ -36,14 +68,23 @@ const TOKEN_PARAMS = ["claim_token", "ct"] as const;
 
 interface State {
   apiKey: string;
-  baseUrl: string;
+  apiBaseUrl: string;
   storage: WebStorage;
+  debug: boolean;
 }
 
 let state: State | null = null;
+/** Set once the SPA listeners are installed, so a second start() doesn't stack them. */
+let spaWired = false;
 
 function isBrowser(): boolean {
   return typeof window !== "undefined";
+}
+
+function log(message: string, detail?: unknown): void {
+  if (!state?.debug) return;
+  if (detail === undefined) console.info(`[myappaffiliate] ${message}`);
+  else console.info(`[myappaffiliate] ${message}`, detail);
 }
 
 /** localStorage can throw (Safari private mode, disabled cookies) — swallow everything. */
@@ -73,6 +114,49 @@ function localStorageAdapter(): WebStorage {
   };
 }
 
+/**
+ * The API host, without the customer typing one.
+ *
+ * A hard-coded host in application code is the thing customers get wrong: it
+ * gets copied between environments, or pasted with a trailing path. So the
+ * default is compiled in, and the two escape hatches are places an ops person
+ * can set a value without touching a source file.
+ */
+function resolveApiBaseUrl(explicit?: string): string {
+  const fromGlobal = (globalThis as { MAA_API_BASE_URL?: unknown }).MAA_API_BASE_URL;
+  const candidate =
+    present(explicit) ??
+    present(scriptAttribute("data-api-base-url")) ??
+    present(typeof fromGlobal === "string" ? fromGlobal : undefined);
+  // Trailing slashes stripped after the fallback, so a blank override (an empty
+  // data attribute, an unset build-time global) falls through to the default
+  // instead of becoming a base URL of "".
+  return (candidate ?? DEFAULT_API_BASE_URL).replace(/\/+$/, "");
+}
+
+/** Trimmed value, or undefined when absent/blank — a blank override means "unset". */
+function present(value: string | undefined | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Read a data-attribute off our own <script> tag, so a `<script src=… data-api-key=…>`
+ * install needs no inline JS at all.
+ */
+function scriptAttribute(name: string): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  // `currentScript` is only set while a script is executing, so a bundled app
+  // calling start() from a module or a callback sees null — hence the lookup by
+  // attribute as the fallback.
+  const current = document.currentScript as HTMLScriptElement | null;
+  const tag =
+    current?.hasAttribute("data-api-key") === true
+      ? current
+      : document.querySelector<HTMLScriptElement>("script[data-api-key]");
+  return tag?.getAttribute(name) ?? undefined;
+}
+
 function generateId(): string {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
@@ -93,7 +177,7 @@ function deviceId(): string {
 async function post(path: string, body: unknown): Promise<Record<string, unknown> | null> {
   if (!state) return null;
   try {
-    const res = await fetch(`${state.baseUrl.replace(/\/+$/, "")}${path}`, {
+    const res = await fetch(`${state.apiBaseUrl}${path}`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${state.apiKey}`,
@@ -101,9 +185,13 @@ async function post(path: string, body: unknown): Promise<Record<string, unknown
       },
       body: JSON.stringify(body),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      log(`${path} → ${res.status}`);
+      return null;
+    }
     return (await res.json()) as Record<string, unknown>;
-  } catch {
+  } catch (error) {
+    log(`${path} failed`, error);
     return null;
   }
 }
@@ -114,6 +202,7 @@ function storeAttribution(res: Record<string, unknown>): boolean {
   if (typeof res.attributionId === "string") {
     state.storage.set(ATTRIBUTION_ID_KEY, res.attributionId);
   }
+  log(`attributed to ${res.affiliateId}`);
   return true;
 }
 
@@ -127,23 +216,58 @@ function firstParam(search: string, names: readonly string[]): string | null {
 }
 
 /**
- * Initialize the SDK. Persists a stable device id, and (when autoCapture is on)
- * reads the referral code / claim token from the current URL. A captured code is
- * persisted ("maa_pending_code") so a later page view or signup still attributes
- * even if this first install call fails.
+ * Re-run capture after client-side navigation.
+ *
+ * A single-page app changes the URL without reloading, so a creator link to a
+ * deep route (`/pricing?via=LUMI`) would otherwise be captured only if it
+ * happened to be the entry page. Patching the history methods means the app
+ * author writes no router glue at all.
  */
-export async function init(options: InitOptions): Promise<void> {
+function wireSpaCapture(): void {
+  if (spaWired || typeof window === "undefined" || !window.history) return;
+  spaWired = true;
+
+  const rerun = () => void capture();
+  for (const name of ["pushState", "replaceState"] as const) {
+    const original = window.history[name];
+    if (typeof original !== "function") continue;
+    window.history[name] = function patched(
+      this: History,
+      ...args: Parameters<History["pushState"]>
+    ) {
+      const result = original.apply(this, args);
+      rerun();
+      return result;
+    } as History[typeof name];
+  }
+  window.addEventListener("popstate", rerun);
+}
+
+/**
+ * Start the SDK. Pass just your key:
+ *
+ *     myAppAffiliate.start("pk_live_…");
+ *
+ * Persists a stable device id, captures the referral from the current URL, and
+ * (unless you turn it off) keeps capturing across client-side route changes. A
+ * captured code is persisted before the network call, so a later page view or
+ * signup still attributes even if this first call fails.
+ */
+export async function start(options: StartOptions | string): Promise<void> {
   if (!isBrowser()) return;
+  const opts: StartOptions = typeof options === "string" ? { apiKey: options } : options;
   state = {
-    apiKey: options.apiKey,
-    baseUrl: options.baseUrl,
-    storage: options.storage ?? localStorageAdapter(),
+    apiKey: opts.apiKey,
+    apiBaseUrl: resolveApiBaseUrl(opts.apiBaseUrl),
+    storage: opts.storage ?? localStorageAdapter(),
+    debug: opts.debug ?? false,
   };
+  log(`started against ${state.apiBaseUrl}`);
   deviceId(); // ensure persisted immediately
 
-  if ((options.autoCapture ?? true) && (await captureFrom(window.location?.search ?? ""))) {
-    return;
-  }
+  const autoCapture = opts.autoCapture ?? true;
+  if (autoCapture && (opts.spa ?? true)) wireSpaCapture();
+  if (autoCapture && (await capture())) return;
 
   // Retry a previously captured code that never made it to the API.
   const pending = state.storage.get(PENDING_CODE_KEY);
@@ -153,48 +277,34 @@ export async function init(options: InitOptions): Promise<void> {
 }
 
 /**
- * Read a referral code / claim token out of one query string and attribute it.
- * Returns false when the query carries neither — the caller then falls back to
- * whatever it was doing (a pending retry, or nothing at all).
- */
-async function captureFrom(search: string): Promise<boolean> {
-  const token = firstParam(search, TOKEN_PARAMS);
-  if (token) {
-    await attributeToken(token);
-    return true;
-  }
-  const code = firstParam(search, CODE_PARAMS);
-  if (code) {
-    await applyCode(code);
-    return true;
-  }
-  return false;
-}
-
-/** `init` under the name the docs use. Identical behaviour. */
-export const configure = init;
-
-/**
- * Re-scan `window.location` for `?via=` / `?claim_token=`.
- *
- * Client-side routers do not reload the page, so the capture `init()` ran on
- * first load never sees a later deep-route navigation. Call this from a route
- * change handler. Idempotent: a URL with no referral params changes nothing
- * and leaves any existing attribution in place.
+ * Scan the current URL for a referral and claim it. Called for you by `start`
+ * and on every client-side route change; call it yourself only if you disabled
+ * `spa` capture. Returns true when something was found and claimed.
  */
 export async function capture(): Promise<boolean> {
   if (!isBrowser() || !state) return false;
-  return captureFrom(window.location?.search ?? "");
+  const search = window.location?.search ?? "";
+  const token = firstParam(search, TOKEN_PARAMS);
+  if (token) return attributeToken(token);
+  const code = firstParam(search, CODE_PARAMS);
+  if (code) return applyCode(code);
+  return false;
 }
 
 /**
- * Attribute from an explicit URL rather than the current location — for
- * routers that hand you the target URL, or a link you captured yourself.
+ * Claim a referral from an explicit URL — for cases where you have the link but
+ * the browser is not on it (a captured deferred link, a custom router).
  */
 export async function attribute(url: string): Promise<boolean> {
   if (!isBrowser() || !state || !url) return false;
-  const query = url.split("#")[0]?.split("?")[1];
-  return query ? captureFrom(query) : false;
+  // slice(1).join keeps everything after the FIRST "?" — a stray second one in
+  // a redirect-style URL must not truncate the params that follow it.
+  const search = url.split("#")[0]?.split("?").slice(1).join("?") ?? "";
+  const token = firstParam(search, TOKEN_PARAMS);
+  if (token) return attributeToken(token);
+  const code = firstParam(search, CODE_PARAMS);
+  if (code) return applyCode(code);
+  return false;
 }
 
 /** Attribute this device to an affiliate by referral code. Silent-safe. */
@@ -222,7 +332,15 @@ export async function attributeToken(claimToken: string): Promise<boolean> {
   return storeAttribution(res);
 }
 
-/** Bind your user id to this device's attribution (call after signup/login). */
+/**
+ * Bind your user id to this device's attribution — call it once, right after
+ * signup or login.
+ *
+ * This id is the join key for every revenue event that follows, whoever bills
+ * the customer: it must be the same string your billing provider reports back
+ * to us (Stripe `metadata.customer_user_id`, Paddle custom data, RevenueCat /
+ * Adapty / Superwall app user id).
+ */
 export async function identify(userId: string): Promise<boolean> {
   if (!isBrowser() || !state || !userId) return false;
   const res = await post("/sdk/identify", {
@@ -249,17 +367,19 @@ export function reset(): void {
 }
 
 /**
- * The whole SDK as one object — what the script-tag build puts on `window.maa`
- * and what the docs use. Identical to the named exports; import whichever
- * suits your codebase.
+ * The namespaced surface — the same `MyAppAffiliate.start(...)` /
+ * `.identify(...)` shape every other platform's SDK exposes, so moving between
+ * them is a rename and nothing more.
  */
-export const maa = {
-  configure,
+export const myAppAffiliate = {
+  start,
+  identify,
   capture,
   attribute,
   applyCode,
   attributeToken,
-  identify,
   attributedAffiliateId,
   reset,
 } as const;
+
+export default myAppAffiliate;

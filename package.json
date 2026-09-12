@@ -1,7 +1,7 @@
 {
   "name": "@myappaffiliate/sdk-web",
-  "version": "0.1.0",
-  "description": "Browser attribution SDK for MyAppAffiliate \u2014 affiliate attribution for SaaS websites and web apps",
+  "version": "0.2.0",
+  "description": "Browser attribution SDK for MyAppAffiliate \u2014 affiliate attribution for web products and SaaS frontends",
   "license": "MIT",
   "author": "MyAppAffiliate",
   "homepage": "https://myappaffiliate.com",
@@ -32,7 +32,7 @@
     "./package.json": "./package.json"
   },
   "sideEffects": ["./dist/sdk.js"],
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
   "publishConfig": {
     "access": "public",
     "provenance": true

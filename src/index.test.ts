@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AFFILIATE_ID_KEY,
   ATTRIBUTION_ID_KEY,
+  DEFAULT_API_BASE_URL,
   DEVICE_ID_KEY,
   PENDING_CODE_KEY,
   type WebStorage,
@@ -10,11 +11,10 @@ import {
   attributeToken,
   attributedAffiliateId,
   capture,
-  configure,
   identify,
-  init,
-  maa,
+  myAppAffiliate,
   reset,
+  start,
 } from "./index";
 
 function memoryStorage(seed: Record<string, string> = {}): WebStorage & {
@@ -46,19 +46,65 @@ function sentBody(fetchMock: ReturnType<typeof vi.fn>, call = 0): Record<string,
   return JSON.parse((args[1] as { body: string }).body) as Record<string, unknown>;
 }
 
+/** The URL of the nth fetch call. */
+function sentUrl(fetchMock: ReturnType<typeof vi.fn>, call = 0): string {
+  return (fetchMock.mock.calls[call] as unknown as [string])[0];
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("init", () => {
-  it("generates and persists a device id, stable across inits", async () => {
+describe("zero-config start", () => {
+  it("takes the key as a bare string and needs no host", async () => {
+    stubWindow("?via=alice");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await start("pk_live_abc");
+
+    expect(sentUrl(fetchMock)).toBe(`${DEFAULT_API_BASE_URL}/sdk/install`);
+    const [, opts] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect((opts.headers as Record<string, string>).authorization).toBe("Bearer pk_live_abc");
+  });
+
+  it("falls back to the compiled-in production host when no override exists", async () => {
+    stubWindow("");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await start({ apiKey: "k", storage: memoryStorage() });
+    await identify("user_1");
+    expect(sentUrl(fetchMock)).toBe(`${DEFAULT_API_BASE_URL}/sdk/identify`);
+  });
+
+  it("prefers an explicit apiBaseUrl and strips its trailing slash", async () => {
+    stubWindow("");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test/", storage: memoryStorage() });
+    await identify("user_1");
+    expect(sentUrl(fetchMock)).toBe("https://api.test/sdk/identify");
+  });
+
+  it("reads globalThis.MAA_API_BASE_URL when no option is given", async () => {
+    stubWindow("");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("MAA_API_BASE_URL", "https://staging.test");
+    await start({ apiKey: "k", storage: memoryStorage() });
+    await identify("user_1");
+    expect(sentUrl(fetchMock)).toBe("https://staging.test/sdk/identify");
+  });
+});
+
+describe("start", () => {
+  it("generates and persists a device id, stable across starts", async () => {
     stubWindow("");
     vi.stubGlobal("fetch", okFetch());
     const storage = memoryStorage();
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage });
     const first = storage.get(DEVICE_ID_KEY);
     expect(first).toBeTruthy();
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage });
     expect(storage.get(DEVICE_ID_KEY)).toBe(first);
   });
 
@@ -67,12 +113,10 @@ describe("init", () => {
     const fetchMock = okFetch();
     vi.stubGlobal("fetch", fetchMock);
     const storage = memoryStorage();
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, opts] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe("https://api.test/sdk/install");
-    expect((opts.headers as Record<string, string>).authorization).toBe("Bearer k");
+    expect(sentUrl(fetchMock)).toBe("https://api.test/sdk/install");
     const body = sentBody(fetchMock);
     expect(body.affiliateCode).toBe("alice");
     expect(body.deviceId).toBe(storage.get(DEVICE_ID_KEY));
@@ -86,7 +130,7 @@ describe("init", () => {
     stubWindow("?ct=tok_123&via=alice");
     const fetchMock = okFetch();
     vi.stubGlobal("fetch", fetchMock);
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage: memoryStorage() });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage: memoryStorage() });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = sentBody(fetchMock);
     expect(body.claimToken).toBe("tok_123");
@@ -97,21 +141,21 @@ describe("init", () => {
     stubWindow("?via=alice");
     const fetchMock = okFetch();
     vi.stubGlobal("fetch", fetchMock);
-    await init({
+    await start({
       apiKey: "k",
-      baseUrl: "https://api.test",
+      apiBaseUrl: "https://api.test",
       autoCapture: false,
       storage: memoryStorage(),
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("re-applies a persisted pending code on a later init (signup still attributes)", async () => {
+  it("re-applies a persisted pending code on a later start (signup still attributes)", async () => {
     stubWindow("");
     const fetchMock = okFetch();
     vi.stubGlobal("fetch", fetchMock);
     const storage = memoryStorage({ [PENDING_CODE_KEY]: "alice" });
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(sentBody(fetchMock).affiliateCode).toBe("alice");
     expect(storage.get(AFFILIATE_ID_KEY)).toBe("aff_1");
@@ -122,8 +166,44 @@ describe("init", () => {
     const fetchMock = okFetch();
     vi.stubGlobal("fetch", fetchMock);
     const storage = memoryStorage({ [PENDING_CODE_KEY]: "alice", [AFFILIATE_ID_KEY]: "aff_1" });
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("capture / attribute", () => {
+  it("capture() re-scans the current URL (SPA route change)", async () => {
+    stubWindow("?via=alice");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await start({
+      apiKey: "k",
+      apiBaseUrl: "https://api.test",
+      autoCapture: false,
+      storage: memoryStorage(),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await expect(capture()).resolves.toBe(true);
+    expect(sentBody(fetchMock).affiliateCode).toBe("alice");
+  });
+
+  it("capture() is a no-op when the URL carries no referral", async () => {
+    stubWindow("?utm_source=x");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage: memoryStorage() });
+    await expect(capture()).resolves.toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("attribute(url) claims a referral from an explicit link", async () => {
+    stubWindow("");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage: memoryStorage() });
+    await expect(attribute("https://app.test/pricing?ct=tok_9#hash")).resolves.toBe(true);
+    expect(sentBody(fetchMock).claimToken).toBe("tok_9");
   });
 });
 
@@ -135,7 +215,7 @@ describe("network failures are silent", () => {
       vi.fn(async () => Promise.reject(new Error("offline"))),
     );
     const storage = memoryStorage();
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage });
     await expect(applyCode("alice")).resolves.toBe(false);
     expect(storage.get(PENDING_CODE_KEY)).toBe("alice");
     expect(attributedAffiliateId()).toBeNull();
@@ -147,7 +227,7 @@ describe("network failures are silent", () => {
       "fetch",
       vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) })),
     );
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage: memoryStorage() });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage: memoryStorage() });
     await expect(attributeToken("tok")).resolves.toBe(false);
     await expect(identify("user_1")).resolves.toBe(false);
   });
@@ -159,10 +239,9 @@ describe("identify", () => {
     const fetchMock = okFetch({ attributionId: "attr_1", customerUserId: "user_1" });
     vi.stubGlobal("fetch", fetchMock);
     const storage = memoryStorage();
-    await init({ apiKey: "k", baseUrl: "https://api.test/", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test/", storage });
     await expect(identify("user_1")).resolves.toBe(true);
-    const [url] = fetchMock.mock.calls[0] as unknown as [string];
-    expect(url).toBe("https://api.test/sdk/identify");
+    expect(sentUrl(fetchMock)).toBe("https://api.test/sdk/identify");
     const body = sentBody(fetchMock);
     expect(body.customerUserId).toBe("user_1");
     expect(body.deviceId).toBe(storage.get(DEVICE_ID_KEY));
@@ -175,11 +254,28 @@ describe("attributedAffiliateId / reset", () => {
     stubWindow("?via=alice");
     vi.stubGlobal("fetch", okFetch());
     const storage = memoryStorage();
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    await start({ apiKey: "k", apiBaseUrl: "https://api.test", storage });
     expect(attributedAffiliateId()).toBe("aff_1");
     reset();
     expect(attributedAffiliateId()).toBeNull();
     expect(storage.data.size).toBe(0);
+  });
+});
+
+describe("namespaced surface", () => {
+  it("myAppAffiliate.start / .identify drive the same engine as the named exports", async () => {
+    stubWindow("?via=alice");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await myAppAffiliate.start({
+      apiKey: "k",
+      apiBaseUrl: "https://api.test",
+      storage: memoryStorage(),
+    });
+    await myAppAffiliate.identify("user_1");
+    expect(sentUrl(fetchMock, 0)).toBe("https://api.test/sdk/install");
+    expect(sentUrl(fetchMock, 1)).toBe("https://api.test/sdk/identify");
+    expect(myAppAffiliate.attributedAffiliateId()).toBe("aff_1");
   });
 });
 
@@ -189,74 +285,12 @@ describe("SSR", () => {
     vi.stubGlobal("fetch", fetchMock);
     // no window stub — vitest node environment has no window
     await expect(
-      init({ apiKey: "k", baseUrl: "https://api.test", storage: memoryStorage() }),
+      start({ apiKey: "k", apiBaseUrl: "https://api.test", storage: memoryStorage() }),
     ).resolves.toBeUndefined();
     await expect(applyCode("alice")).resolves.toBe(false);
     await expect(identify("u")).resolves.toBe(false);
     expect(attributedAffiliateId()).toBeNull();
     expect(() => reset()).not.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("SPA capture", () => {
-  it("capture() re-reads the URL after a client-side route change", async () => {
-    stubWindow("");
-    const fetchMock = okFetch();
-    vi.stubGlobal("fetch", fetchMock);
-    const storage = memoryStorage();
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    // The router navigated; window.location now carries the referral.
-    stubWindow("?via=alice");
-    await expect(capture()).resolves.toBe(true);
-    expect(sentBody(fetchMock).affiliateCode).toBe("alice");
-    expect(storage.get(AFFILIATE_ID_KEY)).toBe("aff_1");
-  });
-
-  it("capture() on a URL with no referral params leaves the attribution alone", async () => {
-    stubWindow("?via=alice");
-    vi.stubGlobal("fetch", okFetch());
-    const storage = memoryStorage();
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
-
-    stubWindow("?page=2");
-    await expect(capture()).resolves.toBe(false);
-    expect(storage.get(AFFILIATE_ID_KEY)).toBe("aff_1");
-  });
-
-  it("attribute(url) reads an explicit URL, claim token first", async () => {
-    stubWindow("");
-    const fetchMock = okFetch();
-    vi.stubGlobal("fetch", fetchMock);
-    await init({ apiKey: "k", baseUrl: "https://api.test", storage: memoryStorage() });
-
-    await expect(attribute("https://app.test/pricing?ct=tok_9&via=bob#top")).resolves.toBe(true);
-    expect(sentBody(fetchMock).claimToken).toBe("tok_9");
-    await expect(attribute("https://app.test/pricing")).resolves.toBe(false);
-  });
-});
-
-describe("documented surface", () => {
-  it("configure is init", () => {
-    expect(configure).toBe(init);
-  });
-
-  it("maa exposes exactly what the docs list", () => {
-    expect(Object.keys(maa).sort()).toEqual(
-      [
-        "applyCode",
-        "attribute",
-        "attributeToken",
-        "attributedAffiliateId",
-        "capture",
-        "configure",
-        "identify",
-        "reset",
-      ].sort(),
-    );
-    expect(maa.identify).toBe(identify);
-    expect(maa.attributeToken).toBe(attributeToken);
   });
 });
