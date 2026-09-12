@@ -6,10 +6,14 @@ import {
   PENDING_CODE_KEY,
   type WebStorage,
   applyCode,
+  attribute,
   attributeToken,
   attributedAffiliateId,
+  capture,
+  configure,
   identify,
   init,
+  maa,
   reset,
 } from "./index";
 
@@ -192,5 +196,67 @@ describe("SSR", () => {
     expect(attributedAffiliateId()).toBeNull();
     expect(() => reset()).not.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("SPA capture", () => {
+  it("capture() re-reads the URL after a client-side route change", async () => {
+    stubWindow("");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const storage = memoryStorage();
+    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The router navigated; window.location now carries the referral.
+    stubWindow("?via=alice");
+    await expect(capture()).resolves.toBe(true);
+    expect(sentBody(fetchMock).affiliateCode).toBe("alice");
+    expect(storage.get(AFFILIATE_ID_KEY)).toBe("aff_1");
+  });
+
+  it("capture() on a URL with no referral params leaves the attribution alone", async () => {
+    stubWindow("?via=alice");
+    vi.stubGlobal("fetch", okFetch());
+    const storage = memoryStorage();
+    await init({ apiKey: "k", baseUrl: "https://api.test", storage });
+
+    stubWindow("?page=2");
+    await expect(capture()).resolves.toBe(false);
+    expect(storage.get(AFFILIATE_ID_KEY)).toBe("aff_1");
+  });
+
+  it("attribute(url) reads an explicit URL, claim token first", async () => {
+    stubWindow("");
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await init({ apiKey: "k", baseUrl: "https://api.test", storage: memoryStorage() });
+
+    await expect(attribute("https://app.test/pricing?ct=tok_9&via=bob#top")).resolves.toBe(true);
+    expect(sentBody(fetchMock).claimToken).toBe("tok_9");
+    await expect(attribute("https://app.test/pricing")).resolves.toBe(false);
+  });
+});
+
+describe("documented surface", () => {
+  it("configure is init", () => {
+    expect(configure).toBe(init);
+  });
+
+  it("maa exposes exactly what the docs list", () => {
+    expect(Object.keys(maa).sort()).toEqual(
+      [
+        "applyCode",
+        "attribute",
+        "attributeToken",
+        "attributedAffiliateId",
+        "capture",
+        "configure",
+        "identify",
+        "reset",
+      ].sort(),
+    );
+    expect(maa.identify).toBe(identify);
+    expect(maa.attributeToken).toBe(attributeToken);
   });
 });

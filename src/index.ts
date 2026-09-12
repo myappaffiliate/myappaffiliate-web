@@ -1,5 +1,5 @@
 /**
- * @maa/sdk-web — browser attribution SDK for MyAppAffiliate.
+ * @myappaffiliate/sdk-web — browser attribution SDK for MyAppAffiliate.
  *
  * Zero runtime dependencies. Works for SaaS websites and web apps: captures
  * referral codes (?via=) and claim tokens (?ct=) from the landing URL, fires
@@ -141,18 +141,8 @@ export async function init(options: InitOptions): Promise<void> {
   };
   deviceId(); // ensure persisted immediately
 
-  if (options.autoCapture ?? true) {
-    const search = window.location?.search ?? "";
-    const token = firstParam(search, TOKEN_PARAMS);
-    if (token) {
-      await attributeToken(token);
-      return;
-    }
-    const code = firstParam(search, CODE_PARAMS);
-    if (code) {
-      await applyCode(code);
-      return;
-    }
+  if ((options.autoCapture ?? true) && (await captureFrom(window.location?.search ?? ""))) {
+    return;
   }
 
   // Retry a previously captured code that never made it to the API.
@@ -160,6 +150,51 @@ export async function init(options: InitOptions): Promise<void> {
   if (pending && !state.storage.get(AFFILIATE_ID_KEY)) {
     await applyCode(pending);
   }
+}
+
+/**
+ * Read a referral code / claim token out of one query string and attribute it.
+ * Returns false when the query carries neither — the caller then falls back to
+ * whatever it was doing (a pending retry, or nothing at all).
+ */
+async function captureFrom(search: string): Promise<boolean> {
+  const token = firstParam(search, TOKEN_PARAMS);
+  if (token) {
+    await attributeToken(token);
+    return true;
+  }
+  const code = firstParam(search, CODE_PARAMS);
+  if (code) {
+    await applyCode(code);
+    return true;
+  }
+  return false;
+}
+
+/** `init` under the name the docs use. Identical behaviour. */
+export const configure = init;
+
+/**
+ * Re-scan `window.location` for `?via=` / `?claim_token=`.
+ *
+ * Client-side routers do not reload the page, so the capture `init()` ran on
+ * first load never sees a later deep-route navigation. Call this from a route
+ * change handler. Idempotent: a URL with no referral params changes nothing
+ * and leaves any existing attribution in place.
+ */
+export async function capture(): Promise<boolean> {
+  if (!isBrowser() || !state) return false;
+  return captureFrom(window.location?.search ?? "");
+}
+
+/**
+ * Attribute from an explicit URL rather than the current location — for
+ * routers that hand you the target URL, or a link you captured yourself.
+ */
+export async function attribute(url: string): Promise<boolean> {
+  if (!isBrowser() || !state || !url) return false;
+  const query = url.split("#")[0]?.split("?")[1];
+  return query ? captureFrom(query) : false;
 }
 
 /** Attribute this device to an affiliate by referral code. Silent-safe. */
@@ -212,3 +247,19 @@ export function reset(): void {
   state.storage.remove(AFFILIATE_ID_KEY);
   state.storage.remove(ATTRIBUTION_ID_KEY);
 }
+
+/**
+ * The whole SDK as one object — what the script-tag build puts on `window.maa`
+ * and what the docs use. Identical to the named exports; import whichever
+ * suits your codebase.
+ */
+export const maa = {
+  configure,
+  capture,
+  attribute,
+  applyCode,
+  attributeToken,
+  identify,
+  attributedAffiliateId,
+  reset,
+} as const;

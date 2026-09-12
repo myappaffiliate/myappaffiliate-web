@@ -1,25 +1,50 @@
 {
-  "name": "@maa/sdk-web",
+  "name": "@myappaffiliate/sdk-web",
   "version": "0.1.0",
-  "description": "Browser attribution SDK for MyAppAffiliate — affiliate attribution for SaaS websites and web apps",
+  "description": "Browser attribution SDK for MyAppAffiliate \u2014 affiliate attribution for SaaS websites and web apps",
   "license": "MIT",
+  "author": "MyAppAffiliate",
+  "homepage": "https://myappaffiliate.com",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/myappaffiliate/myappaffiliate-web.git"
   },
-  "homepage": "https://myappaffiliate.com",
   "bugs": "https://github.com/myappaffiliate/myappaffiliate-web/issues",
   "keywords": ["affiliate", "attribution", "referral", "saas", "analytics"],
+  "private": false,
   "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/sdk.js",
+  "jsdelivr": "./dist/sdk.js",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
   },
-  "files": ["src", "README.md", "LICENSE"],
+  "sideEffects": ["./dist/sdk.js"],
+  "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
+    "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "pnpm run build"
   },
   "devDependencies": {
+    "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }

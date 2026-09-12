@@ -1,4 +1,4 @@
-# @maa/sdk-web
+# @myappaffiliate/sdk-web
 
 Browser attribution SDK for MyAppAffiliate — for SaaS websites and web apps.
 Zero dependencies, silent-safe (never throws into your app), SSR-safe (all
@@ -6,14 +6,27 @@ calls are no-ops on the server).
 
 ## Install
 
+**Script tag** — no build tooling, captures on load, exposes `window.maa`:
+
+```html
+<script
+  src="https://cdn.jsdelivr.net/npm/@myappaffiliate/sdk-web@0/dist/sdk.js"
+  data-api-key="sdk_xxx"
+  data-base-url="https://api.myappaffiliate.com"
+  async
+></script>
+```
+
+**npm** — for app frontends:
+
 ```bash
-npm install @maa/sdk-web
+npm install @myappaffiliate/sdk-web
 ```
 
 ## Usage
 
 ```ts
-import { init, identify, attributedAffiliateId, reset } from "@maa/sdk-web";
+import { init, identify, attributedAffiliateId, reset } from "@myappaffiliate/sdk-web";
 
 // Call once on page load (e.g. app root, layout effect, or a <script type="module">).
 await init({
@@ -38,7 +51,7 @@ reset();
 If you collect a referral code in a form instead of the URL:
 
 ```ts
-import { applyCode } from "@maa/sdk-web";
+import { applyCode } from "@myappaffiliate/sdk-web";
 await applyCode("alice"); // → true when attribution succeeded
 ```
 
@@ -58,11 +71,18 @@ await applyCode("alice"); // → true when attribution succeeded
 | Function | Returns | Notes |
 | --- | --- | --- |
 | `init(options)` | `Promise<void>` | `{ apiKey, baseUrl, autoCapture?, storage? }` |
+| `configure(options)` | `Promise<void>` | alias of `init` |
+| `capture()` | `Promise<boolean>` | re-scan `window.location` after an SPA route change |
+| `attribute(url)` | `Promise<boolean>` | attribute from an explicit URL |
 | `applyCode(code)` | `Promise<boolean>` | attribute via referral code |
 | `attributeToken(token)` | `Promise<boolean>` | redeem a click claim token |
 | `identify(userId)` | `Promise<boolean>` | bind your user id |
 | `attributedAffiliateId()` | `string \| null` | persisted affiliate id |
 | `reset()` | `void` | clear all persisted SDK state |
+
+Every function is also on the `maa` object (`import { maa } from
+"@myappaffiliate/sdk-web"`), which is what the script-tag build puts on
+`window.maa`. Same functions, two spellings — use whichever fits.
 
 `storage` accepts any `{ get, set, remove }` implementation if you prefer
 cookies or an in-memory store (used by the test suite).
